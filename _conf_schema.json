@@ -1,0 +1,39 @@
+{
+  "source_mode": {
+    "type": "string",
+    "description": "余额查询的密钥来源",
+    "options": ["current", "provider", "manual"],
+    "default": "current",
+    "hint": "current：当前会话模型；provider：下方固定模型；manual：从环境变量读取独立 Key。默认支持 DeepSeek 官方余额接口。"
+  },
+  "provider_id": {
+    "type": "string",
+    "description": "固定查询的模型提供商",
+    "_special": "select_provider",
+    "default": "",
+    "hint": "仅 source_mode=provider 时生效，从 AstrBot 已配置的聊天模型中选择。"
+  },
+  "api_key_env": {
+    "type": "string",
+    "description": "独立 Key 的环境变量名称",
+    "default": "DEEPSEEK_API_KEY",
+    "hint": "仅 manual 模式生效。这里填写变量名，不是密钥本身；在运行 AstrBot 的进程或容器中设置变量。"
+  },
+  "balance_url": {
+    "type": "string",
+    "description": "余额接口完整地址（通常留空）",
+    "default": "",
+    "hint": "留空时自动使用 DeepSeek 官方 /user/balance。自定义接口需返回 DeepSeek 格式的 JSON；复用模型 Key 时必须与该模型 api_base 同源，只接受 HTTPS。"
+  },
+  "timeout_seconds": {
+    "type": "int",
+    "description": "查询超时秒数（1～60）",
+    "default": 10
+  },
+  "cache_seconds": {
+    "type": "int",
+    "description": "成功查询缓存秒数（0～300，0 为关闭）",
+    "default": 30,
+    "hint": "缓存按接口和实际 Key 隔离，返回时显示查询时间。"
+  }
+}

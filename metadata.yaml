@@ -1,0 +1,7 @@
+name: astrbot_plugin_wallet_balance
+display_name: API 钱包余额
+desc: 查询当前会话或指定模型服务商的 API 钱包余额，默认支持 DeepSeek 官方接口。
+version: 0.1.0
+author: RioMaker
+repo: null
+astrbot_version: ">=4.5.7,<5"
