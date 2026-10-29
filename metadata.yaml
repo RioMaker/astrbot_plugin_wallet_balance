@@ -1,7 +1,7 @@
 name: astrbot_plugin_wallet_balance
 display_name: API 钱包余额
 desc: 用角色气泡静态图查询 API 钱包余额，存档各群真实 Token 并按 DeepSeek 官网峰谷价格估算费用，支持管理员群汇总。
-version: 0.2.0
+version: 0.2.1
 author: RioMaker
 repo: https://github.com/RioMaker/astrbot_plugin_wallet_balance
 astrbot_version: ">=4.5.7,<5"

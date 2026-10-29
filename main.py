@@ -172,7 +172,7 @@ class WalletBalance(Star):
             return None, False, True
 
     @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("钱包余额", alias={"余额查询", "wallet"})
+    @filter.command("余额", alias={"钱包余额", "余额查询", "wallet"})
     async def wallet(self, event: AstrMessageEvent):
         """查询当前会话或指定服务商的钱包，仅限 AstrBot 管理员。"""
         event.stop_event()
