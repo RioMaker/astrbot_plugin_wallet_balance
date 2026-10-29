@@ -1,6 +1,8 @@
 import asyncio
 import importlib.util
 import sys
+from dataclasses import FrozenInstanceError
+from decimal import Decimal
 from pathlib import Path
 from types import ModuleType
 from types import SimpleNamespace as NS
@@ -260,6 +262,17 @@ def main(monkeypatch):
         command=command, permission_type=permission, PermissionType=NS(ADMIN="admin")
     )
     star_api = ModuleType("astrbot.api.star")
+    message_api = ModuleType("astrbot.api.message_components")
+
+    class Image:
+        def __init__(self, data):
+            self.data = data
+
+        @classmethod
+        def fromBytes(cls, data):
+            return cls(data)
+
+    message_api.Image = Image
 
     class Star:
         def __init__(self, context):
@@ -272,6 +285,7 @@ def main(monkeypatch):
         "astrbot.api": api,
         "astrbot.api.event": event_api,
         "astrbot.api.star": star_api,
+        "astrbot.api.message_components": message_api,
     }.items():
         monkeypatch.setitem(sys.modules, name, value)
     spec = importlib.util.spec_from_file_location(f"{PACKAGE}.main", ROOT / "main.py")
@@ -283,14 +297,14 @@ def main(monkeypatch):
 def test_admin_declaration_and_cache_key_isolation(main, monkeypatch):
     assert main.WalletBalance.wallet.permission == "admin"
     p = provider()
-    plugin = main.WalletBalance(context(p), {})
+    plugin = main.WalletBalance(context(p), {"output_mode": "text"})
     calls = []
 
     async def fetch(target, timeout):
         calls.append(target.key)
-        return balance.parse_balance(PAYLOAD)
+        return balance.parse_balance_snapshot(PAYLOAD)
 
-    monkeypatch.setattr(main, "fetch_balance", fetch)
+    monkeypatch.setattr(main, "fetch_balance_snapshot", fetch)
     event = NS(
         unified_msg_origin="session-a",
         stop_event=lambda: None,
@@ -320,7 +334,7 @@ def test_failed_queries_are_not_cached(main, monkeypatch):
         calls.append(1)
         raise balance.BalanceError("safe error")
 
-    monkeypatch.setattr(main, "fetch_balance", fetch)
+    monkeypatch.setattr(main, "fetch_balance_snapshot", fetch)
     event = NS(
         unified_msg_origin="session-a",
         stop_event=lambda: None,
@@ -334,3 +348,300 @@ def test_failed_queries_are_not_cached(main, monkeypatch):
         assert not plugin._cache
 
     asyncio.run(run())
+
+
+def test_structured_snapshot_preserves_decimal_precision_and_is_immutable():
+    payload = {
+        "is_available": True,
+        "balance_infos": [
+            {
+                "currency": "CNY",
+                "total_balance": "25.12345678",
+                "topped_up_balance": "20.00000001",
+                "granted_balance": "5.12345677",
+            }
+        ],
+    }
+    snapshot = balance.parse_balance_snapshot(payload)
+    assert isinstance(snapshot, balance.BalanceSnapshot)
+    assert isinstance(snapshot.balances, tuple)
+    row = snapshot.balances[0]
+    assert row.total == Decimal("25.12345678")
+    assert row.topped_up == Decimal("20.00000001")
+    assert row.granted == Decimal("5.12345677")
+    assert snapshot.as_text() == balance.parse_balance(payload)
+    assert "CNY 总余额：25.12" in snapshot.as_text()
+    with pytest.raises(FrozenInstanceError):
+        row.total = Decimal("0")
+    with pytest.raises(FrozenInstanceError):
+        snapshot.is_available = False
+
+
+@pytest.mark.parametrize("value", ["0.00000000", "-0.00000001", "-123.87654321"])
+def test_structured_snapshot_keeps_zero_and_negative_amounts(value):
+    payload = {
+        "is_available": False,
+        "balance_infos": [dict(PAYLOAD["balance_infos"][0], total_balance=value)],
+    }
+    snapshot = balance.parse_balance_snapshot(payload)
+    assert snapshot.is_available is False
+    assert snapshot.balances[0].total == Decimal(value)
+
+
+@pytest.mark.parametrize(
+    "field", ["currency", "total_balance", "topped_up_balance", "granted_balance"]
+)
+@pytest.mark.parametrize("missing", [False, True])
+def test_structured_snapshot_rejects_null_or_missing_fields(field, missing):
+    row = dict(PAYLOAD["balance_infos"][0])
+    if missing:
+        del row[field]
+    else:
+        row[field] = None
+    with pytest.raises(balance.BalanceError):
+        balance.parse_balance_snapshot({"is_available": True, "balance_infos": [row]})
+
+
+def test_text_fetch_wrapper_remains_compatible(monkeypatch):
+    snapshot = balance.parse_balance_snapshot(PAYLOAD)
+    target = balance.Target("source", balance.OFFICIAL_URL, "secret-test-key")
+    calls = []
+
+    async def fetch(actual_target, timeout):
+        calls.append((actual_target, timeout))
+        return snapshot
+
+    monkeypatch.setattr(balance, "fetch_balance_snapshot", fetch)
+    assert asyncio.run(balance.fetch_balance(target, 7)) == snapshot.as_text()
+    assert calls == [(target, 7)]
+
+
+def wallet_event():
+    event = NS(
+        unified_msg_origin="session-a",
+        stopped=False,
+        plain_result=lambda text: text,
+        chain_result=lambda images: images,
+    )
+    event.stop_event = lambda: setattr(event, "stopped", True)
+    return event
+
+
+def install_renderer(monkeypatch, render=None):
+    calls = []
+    module = ModuleType(f"{PACKAGE}.balance_renderer")
+
+    def record(**kwargs):
+        calls.append(kwargs)
+        return render(**kwargs) if render else kwargs["currency"].encode()
+
+    module.render_balance_bubble = record
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    return calls
+
+
+def snapshot_fetch(monkeypatch, main, payload=PAYLOAD):
+    snapshot = balance.parse_balance_snapshot(payload)
+    calls = []
+
+    async def fetch(target, timeout):
+        calls.append((target, timeout))
+        return snapshot
+
+    monkeypatch.setattr(main, "fetch_balance_snapshot", fetch)
+    return snapshot, calls
+
+
+def wallet_results(plugin, event):
+    async def run():
+        return [item async for item in plugin.wallet(event)]
+
+    return asyncio.run(run())
+
+
+def test_default_image_uses_full_precision_total_and_minimal_fields(main, monkeypatch):
+    payload = {
+        "is_available": True,
+        "balance_infos": [
+            {
+                "currency": "USD",
+                "total_balance": "25.12345678",
+                "topped_up_balance": "20.00000001",
+                "granted_balance": "5.12345677",
+            }
+        ],
+    }
+    snapshot, fetch_calls = snapshot_fetch(monkeypatch, main, payload)
+    render_calls = install_renderer(monkeypatch)
+    monkeypatch.setattr(main, "query_time", lambda: "原始查询时间 北京时间")
+    plugin = main.WalletBalance(context(provider(key="secret-test-key")), {})
+    event = wallet_event()
+    results = wallet_results(plugin, event)
+    assert event.stopped
+    assert len(results) == 1 and len(results[0]) == 1
+    assert isinstance(results[0][0], main.Image)
+    assert results[0][0].data == b"USD"
+    assert render_calls == [
+        {
+            "currency": "USD",
+            "total": Decimal("25.12345678"),
+            "is_available": True,
+            "query_stamp": "原始查询时间 北京时间",
+            "cached": False,
+            "font_path": None,
+        }
+    ]
+    assert "secret-test-key" not in repr(render_calls)
+    assert len(fetch_calls) == 1
+    assert next(iter(plugin._cache.values()))[1] is snapshot
+
+
+def test_multiple_currencies_produce_independent_images(main, monkeypatch):
+    payload = {
+        "is_available": False,
+        "balance_infos": [
+            dict(PAYLOAD["balance_infos"][0], total_balance="0.00000000"),
+            {
+                "currency": "USD",
+                "total_balance": "-0.00000001",
+                "topped_up_balance": "0",
+                "granted_balance": "-0.00000001",
+            },
+        ],
+    }
+    snapshot_fetch(monkeypatch, main, payload)
+    calls = install_renderer(monkeypatch)
+    plugin = main.WalletBalance(context(provider()), {"font_path": "custom-font.ttf"})
+    results = wallet_results(plugin, wallet_event())
+    assert [image.data for image in results[0]] == [b"CNY", b"USD"]
+    assert [call["currency"] for call in calls] == ["CNY", "USD"]
+    assert [call["total"] for call in calls] == [Decimal("0"), Decimal("-0.00000001")]
+    assert all(
+        not {"topped_up", "granted", "source_label"}.intersection(call)
+        for call in calls
+    )
+    assert all(call["is_available"] is False for call in calls)
+    assert all(call["font_path"] == "custom-font.ttf" for call in calls)
+
+
+def test_cached_images_keep_original_query_time_and_expire(main, monkeypatch):
+    _, fetch_calls = snapshot_fetch(monkeypatch, main)
+    calls = install_renderer(monkeypatch)
+    now = [100.0]
+    monkeypatch.setattr(main, "time", NS(monotonic=lambda: now[0]))
+    stamps = iter(["第一次查询 北京时间", "第二次查询 北京时间"])
+    monkeypatch.setattr(main, "query_time", lambda: next(stamps))
+    plugin = main.WalletBalance(context(provider()), {"cache_seconds": 30})
+
+    async def run():
+        assert len([item async for item in plugin.wallet(wallet_event())]) == 1
+        now[0] = 120.0
+        assert len([item async for item in plugin.wallet(wallet_event())]) == 1
+        now[0] = 131.0
+        assert len([item async for item in plugin.wallet(wallet_event())]) == 1
+
+    asyncio.run(run())
+    assert len(fetch_calls) == 2
+    assert [call["cached"] for call in calls] == [False, True, False]
+    assert [call["query_stamp"] for call in calls] == [
+        "第一次查询 北京时间",
+        "第一次查询 北京时间",
+        "第二次查询 北京时间",
+    ]
+
+
+def test_text_mode_never_loads_renderer(main, monkeypatch):
+    snapshot_fetch(monkeypatch, main)
+    monkeypatch.setitem(sys.modules, f"{PACKAGE}.balance_renderer", None)
+    plugin = main.WalletBalance(context(provider()), {"output_mode": "text"})
+    results = wallet_results(plugin, wallet_event())
+    assert len(results) == 1 and isinstance(results[0], str)
+    assert "CNY 总余额：110.00" in results[0]
+    assert "气泡图片暂不可用" not in results[0]
+
+
+@pytest.mark.parametrize("failure", ["render", "import"])
+def test_image_failure_falls_back_to_actual_balance_without_secret(
+    main, monkeypatch, failure
+):
+    snapshot_fetch(monkeypatch, main)
+    warnings = []
+    monkeypatch.setattr(main, "logger", NS(warning=warnings.append))
+    if failure == "import":
+        monkeypatch.setitem(sys.modules, f"{PACKAGE}.balance_renderer", None)
+    else:
+
+        def broken(**kwargs):
+            raise RuntimeError("Bearer secret-test-key")
+
+        install_renderer(monkeypatch, broken)
+    plugin = main.WalletBalance(context(provider(key="secret-test-key")), {})
+    results = wallet_results(plugin, wallet_event())
+    assert len(results) == 1 and isinstance(results[0], str)
+    assert "气泡图片暂不可用" in results[0]
+    assert "CNY 总余额：110.00" in results[0]
+    assert "充值余额：100.00" in results[0] and "赠送余额：10.00" in results[0]
+    assert "查询时间：" in results[0]
+    assert warnings and "secret-test-key" not in repr(warnings + results)
+
+
+def test_second_currency_render_failure_returns_complete_text_no_partial_image(
+    main, monkeypatch
+):
+    payload = {
+        "is_available": True,
+        "balance_infos": [
+            PAYLOAD["balance_infos"][0],
+            dict(PAYLOAD["balance_infos"][0], currency="USD", total_balance="12.34"),
+        ],
+    }
+    snapshot_fetch(monkeypatch, main, payload)
+
+    def render(**kwargs):
+        if kwargs["currency"] == "USD":
+            raise RuntimeError("unavailable")
+        return b"first image"
+
+    calls = install_renderer(monkeypatch, render)
+    results = wallet_results(
+        main.WalletBalance(context(provider()), {}), wallet_event()
+    )
+    assert len(calls) == 2
+    assert len(results) == 1 and isinstance(results[0], str)
+    assert "CNY 总余额：110.00" in results[0] and "USD 总余额：12.34" in results[0]
+
+
+@pytest.mark.parametrize("failure", ["safe", "unexpected", "malformed"])
+def test_query_errors_never_render_or_cache_or_disclose_credentials(
+    main, monkeypatch, failure
+):
+    calls = install_renderer(monkeypatch)
+    warnings = []
+    monkeypatch.setattr(main, "logger", NS(warning=warnings.append))
+
+    async def fetch(target, timeout):
+        if failure == "safe":
+            raise balance.BalanceError("safe error")
+        if failure == "unexpected":
+            raise RuntimeError("Bearer secret-test-key https://private.example")
+        return balance.parse_balance_snapshot({"private": "secret-test-key"})
+
+    monkeypatch.setattr(main, "fetch_balance_snapshot", fetch)
+    plugin = main.WalletBalance(context(provider(key="secret-test-key")), {})
+    event = wallet_event()
+    results = wallet_results(plugin, event)
+    assert event.stopped
+    assert len(results) == 1 and isinstance(results[0], str)
+    assert not calls and not plugin._cache
+    assert "secret-test-key" not in repr(results + warnings)
+    assert "private.example" not in repr(results + warnings)
+
+
+def test_rejected_provider_does_not_query_or_render(main, monkeypatch):
+    _, fetch_calls = snapshot_fetch(monkeypatch, main)
+    calls = install_renderer(monkeypatch)
+    plugin = main.WalletBalance(context(provider("https://relay.example/v1")), {})
+    results = wallet_results(plugin, wallet_event())
+    assert len(results) == 1 and isinstance(results[0], str)
+    assert "第三方中转" in results[0]
+    assert not fetch_calls and not calls and not plugin._cache

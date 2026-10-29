@@ -1,4 +1,23 @@
 {
+  "max_archive_mib": {
+    "type": "int",
+    "description": "群消耗存档大小上限 MiB（1～1024）",
+    "default": 64,
+    "hint": "按群和北京日期永久保留汇总，不自动删除旧日期。达到上限时标记记录不完整；可备份数据库并调大上限后重载。"
+  },
+  "output_mode": {
+    "type": "string",
+    "description": "余额展示方式",
+    "options": ["image", "text"],
+    "default": "image",
+    "hint": "image：将余额写入角色气泡并发送静态图片；text：保留文字回复。图片生成失败时自动降级为文字。"
+  },
+  "font_path": {
+    "type": "string",
+    "description": "气泡图片中文字体路径（可选）",
+    "default": "",
+    "hint": "留空检测系统中文字体。Linux 可安装 Noto Sans CJK 或文泉驿；未找到字体时回复文字，不自动下载字体。"
+  },
   "source_mode": {
     "type": "string",
     "description": "余额查询的密钥来源",

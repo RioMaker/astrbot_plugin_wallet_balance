@@ -20,6 +20,29 @@ class BalanceError(Exception):
 
 
 @dataclass(frozen=True)
+class CurrencyBalance:
+    currency: str
+    total: Decimal
+    topped_up: Decimal
+    granted: Decimal
+
+
+@dataclass(frozen=True)
+class BalanceSnapshot:
+    is_available: bool
+    balances: tuple[CurrencyBalance, ...]
+
+    def as_text(self):
+        lines = ["API 可用：" + ("是" if self.is_available else "否")]
+        for row in self.balances:
+            lines.append(
+                f"{row.currency} 总余额：{row.total:.2f}\n"
+                f"充值余额：{row.topped_up:.2f}\n赠送余额：{row.granted:.2f}"
+            )
+        return "\n".join(lines)
+
+
+@dataclass(frozen=True)
 class Target:
     label: str
     url: str
@@ -126,14 +149,14 @@ async def resolve_target(context, config, umo):
     )
 
 
-def parse_balance(data):
+def parse_balance_snapshot(data):
     try:
         if not isinstance(data, dict) or type(data["is_available"]) is not bool:
             raise ValueError
         infos = data["balance_infos"]
         if not isinstance(infos, list) or not 1 <= len(infos) <= 16:
             raise ValueError
-        lines = ["API 可用：" + ("是" if data["is_available"] else "否")]
+        balances = []
         for info in infos:
             currency = info["currency"]
             if currency not in ("CNY", "USD"):
@@ -149,19 +172,21 @@ def parse_balance(data):
                 amount = Decimal(raw)
                 if not amount.is_finite() or abs(amount) > Decimal("1e15"):
                     raise ValueError
-                amounts.append(f"{amount:.2f}")
-            lines.append(
-                f"{currency} 总余额：{amounts[0]}\n"
-                f"充值余额：{amounts[1]}\n赠送余额：{amounts[2]}"
-            )
-        return "\n".join(lines)
+                amounts.append(amount)
+            balances.append(CurrencyBalance(currency, *amounts))
+        return BalanceSnapshot(data["is_available"], tuple(balances))
     except (KeyError, TypeError, ValueError, InvalidOperation):
         raise BalanceError(
             "余额响应格式不兼容或字段无效；请确认平台支持 DeepSeek /user/balance 格式。"
         ) from None
 
 
-async def fetch_balance(target, timeout):
+def parse_balance(data):
+    """Retain the original text adapter for callers that do not need images."""
+    return parse_balance_snapshot(data).as_text()
+
+
+async def fetch_balance_snapshot(target, timeout):
     try:
         async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=timeout)
@@ -188,7 +213,7 @@ async def fetch_balance(target, timeout):
                     body.extend(chunk)
                     if len(body) > 65536:
                         raise BalanceError("余额接口响应过大，已停止读取。")
-                return parse_balance(json.loads(body))
+                return parse_balance_snapshot(json.loads(body))
     except BalanceError:
         raise
     except (asyncio.TimeoutError, TimeoutError):
@@ -199,6 +224,10 @@ async def fetch_balance(target, timeout):
         ) from None
     except (ValueError, UnicodeError):
         raise BalanceError("余额接口未返回有效 JSON，请确认地址及平台接口。") from None
+
+
+async def fetch_balance(target, timeout):
+    return (await fetch_balance_snapshot(target, timeout)).as_text()
 
 
 def bounded_int(config, name, default, lower, upper):
